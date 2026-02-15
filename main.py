@@ -4,7 +4,7 @@ from typing import Optional
 from datetime import datetime
 import logging
 
-from telegram import Update, ChatPermissions
+from telegram import Update, ChatPermissions, ChatMember
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 
@@ -15,149 +15,222 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Токен вашего бота (замените на свой)
+# Токен вашего бота
 BOT_TOKEN = "7245379721:AAG_5q9hPGHdQwSFH5f0jw0NsmauKajyKsI"
 
 # Команда /random - выбирает случайного участника
 async def random_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Получаем информацию о чате
         chat_id = update.effective_chat.id
-        chat = await context.bot.get_chat(chat_id)
+        message = update.effective_message
         
-        # Получаем список участников чата
-        # Внимание: некоторые пользователи могут скрыть свой username
-        members_count = await context.bot.get_chat_member_count(chat_id)
+        # Отправляем сообщение о начале поиска
+        status_message = await message.reply_text("🔍 *ищу участников...*", parse_mode=ParseMode.MARKDOWN)
         
-        # Получаем администраторов чата
+        # Получаем администраторов чата (всегда доступно)
         admins = await context.bot.get_chat_administrators(chat_id)
-        admin_ids = [admin.user.id for admin in admins]
         
-        # Пытаемся получить полный список участников через итерацию
-        # Важно: Бот должен быть администратором, чтобы получать список участников
+        # Собираем всех участников через администраторов
+        # (это не идеально, но работает без прав админа)
+        members = []
+        
+        for admin in admins:
+            if not admin.user.is_bot and admin.user not in members:
+                members.append(admin.user)
+        
+        # Также пробуем получить участников через историю сообщений (если есть)
         try:
-            # Создаем список для хранения участников
-            members = []
-            
-            # Получаем участников (ограничение: можно получить до 200 участников)
-            # Для больших чатов может потребоваться пагинация
-            async for member in chat.get_members(limit=200):
-                # Исключаем ботов и администраторов, если нужно
-                if not member.user.is_bot:
-                    members.append(member.user)
-            
-            if not members:
-                await update.message.reply_text("Не удалось найти участников в чате.")
-                return
-            
-            # Выбираем случайного участника
-            chosen_one = random.choice(members)
-            
-            # Форматируем сообщение
-            if chosen_one.username:
-                mention = f"@{chosen_one.username}"
-            else:
-                mention = f"[{chosen_one.first_name}](tg://user?id={chosen_one.id})"
-            
-            # Отправляем результат с красивым оформлением
-            await update.message.reply_text(
-                f"*боги рандома выбирают..*\n"
-                f"..этого участника: {mention}",
+            # Получаем последние сообщения для поиска участников
+            async for msg in context.bot.get_chat_history(chat_id, limit=100):
+                if msg.from_user and not msg.from_user.is_bot:
+                    if msg.from_user not in members:
+                        members.append(msg.from_user)
+        except:
+            pass  # игнорируем ошибки при получении истории
+        
+        if not members:
+            await status_message.edit_text(
+                "❌ *не удалось найти участников*\n"
+                "убедитесь, что в чате есть активные пользователи",
                 parse_mode=ParseMode.MARKDOWN
             )
-            
-        except Exception as e:
-            logger.error(f"ошибка при получении участников: {e}")
-            # Альтернативный метод: используем упоминание по ID
-            await update.message.reply_text(
-                "используем упрощенный метод выбора...\n"
-                "🎲 *случайный выбор:*\n"
-                f"выбран участник: {random.randint(1, 100000)}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
+            return
+        
+        # Выбираем случайного участника
+        chosen_one = random.choice(members)
+        
+        # Форматируем упоминание
+        if chosen_one.username:
+            mention = f"@{chosen_one.username}"
+        else:
+            mention = f"[{chosen_one.first_name}](tg://user?id={chosen_one.id})"
+        
+        # Удаляем статусное сообщение
+        await status_message.delete()
+        
+        # Отправляем результат
+        await message.reply_text(
+            f"🎲 *боги рандома выбрали:*\n"
+            f"└ {mention}\n\n"
+            f"*участников в списке:* {len(members)}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
     except Exception as e:
         logger.error(f"ошибка в команде /random: {e}")
-        await update.message.reply_text("произошла ошибка при выполнении команды.")
+        await update.message.reply_text(
+            "❌ *ошибка при выборе участника*\n"
+            "попробуйте позже или сделайте бота администратором",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 # Команда /all - отмечает всех участников
 async def mention_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
+        message = update.effective_message
         
-        # Получаем количество участников
-        members_count = await context.bot.get_chat_member_count(chat_id)
+        # Проверяем, является ли бот администратором
+        bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
         
-        # Получаем участников чата
-        chat = await context.bot.get_chat(chat_id)
-        
-        mentions = []
-        member_count = 0
-        
-        # Собираем упоминания участников
-        async for member in chat.get_members(limit=200):
-            user = member.user
-            if not user.is_bot:
-                member_count += 1
-                if user.username:
-                    mentions.append(f"@{user.username}")
-                else:
-                    mentions.append(f"[{user.first_name}](tg://user?id={user.id})")
-        
-        if not mentions:
-            await update.message.reply_text("не удалось найти участников для отметки")
+        if bot_member.status not in ["administrator", "creator"]:
+            await message.reply_text(
+                "⚠️ *ботам нужны права администратора*\n"
+                "для отметки всех участников сделайте меня администратором!\n\n"
+                "*нужные права:*\n"
+                "• Чтение сообщений\n"
+                "• Удаление сообщений (опционально)",
+                parse_mode=ParseMode.MARKDOWN
+            )
             return
         
-        # Разбиваем на части, если упоминаний слишком много (ограничение Telegram)
-        chunk_size = 40  # Безопасное количество упоминаний в одном сообщении
+        # Отправляем сообщение о начале
+        status_message = await message.reply_text(
+            "🔄 *собираю участников...*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Получаем всех участников чата
+        members = []
+        members_count = 0
+        
+        try:
+            # Пытаемся получить всех участников (только для админов)
+            async for member in context.bot.get_chat_members(chat_id):
+                user = member.user
+                if not user.is_bot:
+                    members.append(user)
+                    members_count += 1
+                    
+                    # Ограничим количество, чтобы не спамить
+                    if members_count >= 100:
+                        break
+                        
+        except Exception as e:
+            logger.error(f"Ошибка при получении участников: {e}")
+            await status_message.edit_text(
+                "❌ *ошибка доступа к списку участников*\n"
+                "проверьте права бота",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        if not members:
+            await status_message.edit_text(
+                "❌ *не найдено участников для отметки*",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Обновляем статус
+        await status_message.edit_text(
+            f"📝 *найдено участников:* {len(members)}\n"
+            f"✍️ *подготавливаю упоминания...*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Формируем упоминания
+        mentions = []
+        for user in members:
+            if user.username:
+                mentions.append(f"@{user.username}")
+            else:
+                mentions.append(f"[{user.first_name}](tg://user?id={user.id})")
+        
+        # Отправляем небольшими группами
+        chunk_size = 30  # Безопасное количество
         chunks = [mentions[i:i + chunk_size] for i in range(0, len(mentions), chunk_size)]
         
-        # Отправляем первое сообщение с информацией
-        await update.message.reply_text(
-            f"📢 *внимание всем!*\n"
-            f"────────────────",
+        # Удаляем статусное сообщение
+        await status_message.delete()
+        
+        # Отправляем заголовок
+        await message.reply_text(
+            f"📢 *ВНИМАНИЕ ВСЕМ ЧАТОМ!* 📢\n"
+            f"─────────────────────\n"
+            f"*всего участников:* {len(members)}\n"
+            f"*частей:* {len(chunks)}",
             parse_mode=ParseMode.MARKDOWN
         )
         
         # Отправляем упоминания частями
         for i, chunk in enumerate(chunks):
-            mention_text = "\n".join(chunk)
-            await update.message.reply_text(
-                f"📢 *Часть {i + 1}/{len(chunks)}*\n"
+            mention_text = " ".join(chunk)  # Используем пробелы для компактности
+            
+            await message.reply_text(
+                f"📢 *часть {i + 1}/{len(chunks)}*\n"
                 f"{mention_text}",
                 parse_mode=ParseMode.MARKDOWN
             )
-            await asyncio.sleep(0.5)  # Небольшая задержка между сообщениями
             
+            # Небольшая задержка между сообщениями
+            await asyncio.sleep(1)
+        
+        # Финальное сообщение
+        await message.reply_text(
+            f"✅ *готово!*\n"
+            f"отмечено {len(members)} участников",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
     except Exception as e:
         logger.error(f"ошибка в команде /all: {e}")
-        await update.message.reply_text("произошла ошибка при упоминании всех участников.")
+        await update.message.reply_text(
+            "❌ *произошла ошибка*\n"
+            "попробуйте позже",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 # Команда /help - справка по боту
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "🤖 *бот-рандомайзер и упоминатель для нашего чатика*\n\n"
-        "доступные команды:\n"
-        "• /random - выбрать случайного участника чата\n"
-        "• /all - отметить всех участников чата\n"
-        "• /help - показать эту справку"
+        "🤖 *бот-рандомайзер и упоминатель*\n\n"
+        "*доступные команды:*\n"
+        "• /random - выбрать случайного участника\n"
+        "• /all - отметить всех участников\n"
+        "• /help - показать справку\n\n"
+        "*важно:*\n"
+        "• для /all нужны права администратора\n"
+        "• для /random права не обязательны, но улучшают работу"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 # Команда /start - приветствие
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "👋 привет! я - ботяр для рандома и отметок\n\n"
-        "используйте /help для списка команд"
+        "👋 *привет! я - бот для рандома и отметок*\n\n"
+        "используй /help для списка команд"
     )
-    await update.message.reply_text(welcome_text)
+    await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
 
 # Обработка ошибок
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Ошибка: {context.error}")
     if update and update.effective_message:
         await update.effective_message.reply_text(
-            "⚠️ произошла ошибка. попробуйте позже или проверьте права бота."
+            "⚠️ *произошла ошибка*\n"
+            "проверьте логи или попробуйте позже",
+            parse_mode=ParseMode.MARKDOWN
         )
 
 # Основная функция
@@ -175,7 +248,8 @@ def main():
     application.add_error_handler(error_handler)
     
     # Запускаем бота
-    print("Бот запущен...")
+    print("🤖 Бот запущен...")
+    print("📝 Проверьте, что бот является администратором чата для полной функциональности")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
